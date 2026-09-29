@@ -1359,6 +1359,32 @@ const AUTONOMOUS_RESULT_ORIGINS: ReadonlySet<SDKMessageOrigin["kind"]> = new Set
   "observer-activity",
 ]);
 
+/** A transcript user entry the CLI wrote for work the model does on its own
+ *  (a background task's notification, a peer's message): plain text nobody
+ *  typed. The live loop never shows it as the user's input, so replay must
+ *  not either. Tool results always stay, whatever their origin. */
+function isAutonomousUserEntry(message: SessionMessage): boolean {
+  if (message.type !== "user") return false;
+  const origin = (message as { origin?: { kind?: unknown } }).origin;
+  if (
+    typeof origin?.kind !== "string" ||
+    !AUTONOMOUS_RESULT_ORIGINS.has(origin.kind as SDKMessageOrigin["kind"])
+  ) {
+    return false;
+  }
+  const content = (message.message as { content?: unknown } | undefined)?.content;
+  return (
+    typeof content === "string" ||
+    (Array.isArray(content) &&
+      content.every(
+        (block) =>
+          typeof block === "object" &&
+          block !== null &&
+          (block as { type?: unknown }).type === "text",
+      ))
+  );
+}
+
 /** Whether this turn's terminal result arrived but its settlement is being
  *  held for background subagents it spawned (see Turn.deferredSettle). The
  *  single spelling of the hold predicate, shared by the consumer's settle
@@ -7612,6 +7638,10 @@ export class ClaudeAcpAgent {
         : { ids: new Map<string, string>() };
     const replayedSubagents = new Set<string>();
     const replayMessage = async (message: SessionMessage): Promise<void> => {
+      // Before the turn bookkeeping: the model's followup to a notification
+      // stays with the turn it belongs to rather than opening one for text
+      // the user never sent.
+      if (isAutonomousUserEntry(message)) return;
       if (
         message.type === "user" &&
         message.parent_tool_use_id === null &&

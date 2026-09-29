@@ -2499,6 +2499,125 @@ describe("synthetic login message (issue #863)", () => {
     expect(JSON.stringify(updates)).not.toContain("system-reminder");
   });
 
+  it("loadSession replay leaves out what the CLI wrote for autonomous work", async () => {
+    const updates: SessionNotification[] = [];
+    const client = {
+      sessionUpdate: async (u: SessionNotification) => {
+        updates.push(u);
+      },
+    } as unknown as AcpClient;
+    const agent = new ClaudeAcpAgent(client, { log: () => {}, error: () => {} });
+    const notification =
+      "<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n</task-notification>";
+
+    vi.mocked(getSessionMessages).mockResolvedValueOnce([
+      {
+        type: "user",
+        uuid: "u1",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        message: { role: "user", content: "run the build in the background" },
+      },
+      {
+        type: "user",
+        uuid: "n1",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        origin: { kind: "task-notification" },
+        message: { role: "user", content: notification },
+      },
+      {
+        // What a subagent sent to the main loop.
+        type: "user",
+        uuid: "p1",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        origin: { kind: "peer", from: "builder" },
+        is_meta: true,
+        isQueuedCommand: true,
+        message: { role: "user", content: "<agent-message>the build is green</agent-message>" },
+      },
+      {
+        type: "assistant",
+        uuid: "a1",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        message: {
+          id: "api-a1",
+          role: "assistant",
+          type: "message",
+          model: "claude-test",
+          content: [
+            { type: "text", text: "The build finished." },
+            {
+              type: "tool_use",
+              id: "toolu_log",
+              name: "Bash",
+              input: { command: "tail build.log" },
+            },
+          ],
+        },
+      },
+      {
+        // A tool result settles its call, whatever origin it carries.
+        type: "user",
+        uuid: "r1",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        origin: { kind: "task-notification" },
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_log", content: "ok" }],
+        },
+      },
+      {
+        // The user may paste such a notification into what they type.
+        type: "user",
+        uuid: "u2",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        origin: { kind: "human" },
+        message: { role: "user", content: `why does my history show this?\n${notification}` },
+      },
+    ] as unknown as Awaited<ReturnType<typeof getSessionMessages>>);
+
+    await (
+      agent as unknown as { replaySessionHistory(sessionId: string): Promise<void> }
+    ).replaySessionHistory("s1");
+
+    const userTexts = updates
+      .filter((u) => u.update.sessionUpdate === "user_message_chunk")
+      .map((u) => (u.update as { content: { text?: string } }).content.text);
+    expect(userTexts).toEqual([
+      "run the build in the background",
+      `why does my history show this?\n${notification}`,
+    ]);
+    // The model's followup to the notification still replays.
+    expect(updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "The build finished." },
+          }),
+        }),
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_log",
+            status: "completed",
+          }),
+        }),
+      ]),
+    );
+  });
+
   it("loadSession replay skips the synthetic login message but keeps the rest", async () => {
     const updates: SessionNotification[] = [];
     const client = {
